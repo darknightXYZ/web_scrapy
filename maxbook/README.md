@@ -9,6 +9,7 @@ Crawl document of https://max.book118.com
 ```
 pip install img2pdf
 
+mkdir images
 python crawl.py **url**
 ```
 
