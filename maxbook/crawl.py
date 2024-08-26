@@ -1,144 +1,190 @@
 import requests
 import img2pdf
-import os
-import re
-import json
-import time
 import sys
+import logging
+import colorlog
+import configparser
+import json
+import urllib3
+import re
+import os
+import time
+import argparse
+from collections import OrderedDict
+from typing import Dict
 
 
-# url = "https://max.book118.com/html/2021/1201/5134121031004130.shtm"
-url = sys.argv[1]
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-headers = {
-    "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer":"https://max.book118.com/"
-}
 
-dirname = './images'
+""" Logging Init """
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+handle = logging.StreamHandler()
+handle.setLevel(logging.DEBUG)
+fmt = colorlog.ColoredFormatter(
+    "%(name)s: %(white)s%(asctime)s%(reset)s %(log_color)s%(levelname)s%(reset)s %(process)d >>> %(log_color)s%(message)s%(reset)s"
+)
+handle.setFormatter(fmt=fmt)
+logger.addHandler(handle)
 
-""" Extracting params : the actual number of pages and the number of pages that can be previewed ......"""
 
-def extract_value(data, key):
-    if isinstance(key, str):
-        value = re.search(r".*?"+key+r":[\s']*(.*?)[',\n]", data, re.DOTALL) if data and key is not None else None
-        return value.group(1) if value else None
+""" Command line parse """
+def SetParser():
+    parser = argparse.ArgumentParser(
+        prog = "Crawler",
+        description="Crawl document of max.book118.com"
+    )
+    parser.add_argument("-u","--url", required=True, help="Specify url of document", type=str)
+    parser.add_argument("-l", "--list", required=False,  help="Specify file list of document")
+    parser.add_argument("-o", "--output-file",required=False,help="Specify path of output-file", type=str)
+
+    return parser.parse_args()
+
+
+""" Global variable Config """
+config = configparser.ConfigParser()
+config.read('./web_crawler.ini')
+base_api = config['Settings']['BASE_API']
+base_path = config['Settings']['BASE_PATH']
+timeout = config['Settings']['TIMEOUT']
+save_path = config['Settings']['SAVE_PATH'] 
+
+
+class Crawler():
+    def __init__(self, url, base_api, base_path, timeout, save_path=save_path) -> None:
+        self.url: str = url
+        self._metadata: Dict = {}
+        self._image_dict: Dict = OrderedDict()
+        self.base_api: str = base_api
+        self.base_path: str = base_path
+        self.timeout: int = timeout
+        self.save_path: str = save_path
+
+
+    """ Formatted raw metadata text"""
+    def extract_metadata(self, raw_string: Dict):
+        # Remove annotation
+        pattern = re.compile("//.*\n")
+        format_list = pattern.sub("", raw_string).split(',')
+        format_dict = {}
+        for item in format_list:
+            item = item.strip('{} \n')
+            key, value = item.split(':')[0], item.split(':')[1]
+            format_dict[key.strip('\'" ')] = value.strip('\'" ')
+        return format_dict
+
+    """ Fetch the metadata of document """
+    def fetch_mata_info(self):
+        try:
+            resp = requests.get(url=self.url)
+            if resp.status_code == 200:
+                logging.info("[*] Successfully access the page")
+            if title := re.search(r".*?title:\s'(.*?)'.*?//文档标题", resp.text, re.DOTALL):
+                logging.info(f"[*] The title of document : {title.group(1)}")
+            if pic_info := re.search(r".*?pic:.*?({.*?})", resp.text, re.DOTALL):
+                self._metadata = self.extract_metadata(pic_info.group(1).strip())
+                logging.info(f"[*] The metadata : {self._metadata}")
+        except Exception:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            logging.error("Exception type: ", exc_type)
+            logging.error("Exception value: ", exc_value)
+            logging.error("Exception traceback: ", exc_traceback)
+            raise
+        
+    """ Crawl all links of image, fitting in self._image_dict"""
+    def crawl_image(self):
+        if not self._metadata:
+            return
+        else:
+            req_url = self.base_api + self.base_path
+            req_params = {k: v for k, v in self._metadata.items() if k == 'aid' or k == 'view_token'}
+            req_params['project_id'] = 1
+            req_params['page'] = 1
+            try:
+                logging.info("[*] Try to fetch all links of images")
+                self.fetch_pic_url(url=req_url, params=req_params, preview_page=self._metadata.get('preview_page'))
+            except:
+                raise
     
-    elif isinstance(key, list):
-        value = {}
-        for item in key:
-            result = re.search(r".*?"+item+r":[\s']*(.*?)[',\n]", data, re.DOTALL)
-            if result:
-                value[item] = result.group(1)
-        return value
-    else:
-        raise Exception("[!] Key type exception")
+    def fetch_pic_url(self, url, params, preview_page):
+        try:
+            resp = requests.get(url=url, params=params, timeout=self.timeout)
+        except Exception:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            logging.error("Exception type: ", exc_type)
+            logging.error("Exception value: ", exc_value)
+            logging.error("Exception traceback: ", exc_traceback)
+            raise
 
+        if not resp.status_code == 200:
+            logging.error(f"[!] Unable to access url : {url}  {resp.status_code}")
+            return
 
-""" Parse the main page """
-
-def parse_main(text, label):
-    # re.DOTALL -> . can match '\n'
-    data = re.search(r".*?"+label+r":.*?({.*?})", text, re.DOTALL) if text and label is not None else None
-    if data:
-        return data.group(1).strip()
-    else:
-        return ''
-    
-
-""" Download all images """
-
-def download_png(url, page):
-    url = f"https:{url}"
-    image_content = requests.get(url).content
-    with open(f'{dirname}/{page}.png', 'wb') as f:
-        f.write(image_content)
-    # print(f"[*] Save Image {page}.png")
-
-
-""" Fetch links of images from response and return the number of pages obtained """
-
-def extract_img_url(dict_data):
-    if dict_data.get('status') != 200 or dict_data.get('message') != 'ok':
-        raise Exception("[!] Return jsonp data has error")
-    img_dict = dict_data.get('data')
-    for key in img_dict.keys():
-        if key == 'page':
-            continue
-        print(f"[*] page:{key} link:{img_dict.get(key)}")
-        download_png(img_dict.get(key), key)
-        current_page = int(key)
-    return current_page
-
-
-""" Recursive request api to fetch the links of images """
-
-def recursive_read_links(url, params, preview_page):
-    resp = requests.get(url=url, params=params, timeout=5)
-    if resp.status_code == 200:
         json_resp = re.search(r"jsonpReturn\((.*)\);", resp.text, re.DOTALL)
         # Convert response to json format
         if dict_data := json.loads(json_resp.group(1)):
-            if (current_page := extract_img_url(dict_data)) < int(preview_page):
+            if dict_data.get('status') != 200 or dict_data.get('message') != 'ok':
+                logging.error("[!] Return jsonp data has error")
+                return
+            img_dict = {int(page):dict_data.get('data')[page] for page in dict_data.get('data').keys() - 'page'}
+            current_page = max(img_dict.keys())
+
+            self._image_dict |= img_dict
+
+            if (int(current_page) < int(preview_page)):
                 params['page'] = str(current_page + 1)
                 # print(params.get('page'))
-                time.sleep(2)
-                recursive_read_links(url, params, preview_page)
+                time.sleep(self.timeout)
+                self.fetch_pic_url(url, params, preview_page)
+
+    def save_images(self):
+        if os.path.exists(self.save_path):
+            pass
+        else:
+            os.mkdir(self.save_path)
+
+        images_path = OrderedDict()
+
+        for page, url in self._image_dict.items():
+            url = f"https:{url}"
+            image_content = requests.get(url).content
+            img_path = f'{self.save_path}/{page}.png'
+            with open(img_path, 'wb') as f:
+                f.write(image_content)
+                images_path[page] = img_path
+            logging.info(f"[*] Save Image {page}.png")
+        
+
+def convert_img_to_pdf(img_file_path, filename='save_file.pdf'):
+    img_file_path = save_path
+    img_files = os.listdir(img_file_path)
+    sort_by_page = lambda x: int(x.split('.')[0])
+    img_files = sorted(img_files, key=sort_by_page)
+    try:
+        with open(filename, "wb") as f:
+            f.write(img2pdf.convert([f'{img_file_path}/{img_file}' for img_file in img_files]))
+        logging.info(f"[*] Successfully convert to pdf -> {filename}")
+    except Exception as e:
+        logging.error(f"[!] convert process has error.")
+        raise
+    [os.remove(f'{img_file_path}/{img_file}') for img_file in img_files]
+
+
+
+if __name__ == '__main__':
+    args = SetParser()
+    print(args._get_args)
+    Crawl = Crawler(args.url, base_api, base_path, timeout=int(timeout))
+
+    Crawl.fetch_mata_info()
+    Crawl.crawl_image()
+    # print(Crawl._image_dict)
+    Crawl.save_images()
+
+    if args.output_file:
+        convert_img_to_pdf(save_path, args.output_file)
     else:
-        raise Exception(f"[!] Unable access url : {url}  {resp.status_code}")
-  
-
-""" Crawling images by parameters """
-
-def crawl_image(params):
-    api_url = "https://openapi.book118.com"
-    path = "/getPreview.html"
-    preview_page = params.get('preview_page')
-    params = {k: v for k, v in params.items() if k == 'aid' or k == 'view_token'}
-    params['project_id'] = '1'
-    params['page'] = 1
-    try:
-        recursive_read_links(url=api_url+path, params=params, preview_page=preview_page)
-    except:
-        raise
-
-
-""" Convert png to pdf """
-
-def convert_to_pdf(dirname, filename, preview_page):
-    img_files = []
-    for index in range(1,preview_page+1):
-        img_files.append(f'{dirname}/{index}.png')
-    try:
-        with open(filename,"wb") as f:
-            f.write(img2pdf.convert(img_files))
-        print()
-        print(f"Success convert pdf {filename}")
-    except Exception:
-        raise
-    finally:
-        [os.remove(img_file) for img_file in img_files]
+        convert_img_to_pdf(save_path)
     
 
-try:
-
-    resp = requests.get(url=url, headers=headers)
-    if resp.status_code == 200:
-        print(f"[*] Successfully access the page\n")
-    
-    if title := re.search(r".*?title:\s'(.*?)'.*?//文档标题", resp.text, re.DOTALL):
-        print(f"[*] The title of document : {title.group(1)}\n")
-    
-    print("[*] Trying to find out the params")
-    
-    pic_info = parse_main(resp.text, label='pic')
-    params = extract_value(pic_info, key=['aid', 'actual_page', 'preview_page', 'view_token'])
-    print(f"{params}\n")
-
-    print("[*] Trying to download images")
-    crawl_image(params)
-
-    convert_to_pdf(dirname=dirname, filename='target.pdf', preview_page=int(params.get('preview_page')))
-
-except:
-    raise
