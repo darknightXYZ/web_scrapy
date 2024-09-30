@@ -1,5 +1,4 @@
 import requests
-import img2pdf
 import sys
 import logging
 import colorlog
@@ -10,23 +9,27 @@ import re
 import os
 import time
 import argparse
+
 from collections import OrderedDict
 from typing import Dict
+
+import img2pdf
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 """ Logging Init """
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-handle = logging.StreamHandler()
-handle.setLevel(logging.DEBUG)
-fmt = colorlog.ColoredFormatter(
-    "%(name)s: %(white)s%(asctime)s%(reset)s %(log_color)s%(levelname)s%(reset)s %(process)d >>> %(log_color)s%(message)s%(reset)s"
-)
-handle.setFormatter(fmt=fmt)
-logger.addHandler(handle)
+def SetLogger():
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+    handle = logging.StreamHandler()
+    handle.setLevel(logging.DEBUG)
+    fmt = colorlog.ColoredFormatter(
+        "%(name)s: %(white)s%(asctime)s%(reset)s %(log_color)s%(levelname)s%(reset)s %(process)d >>> %(log_color)s%(message)s%(reset)s"
+    )
+    handle.setFormatter(fmt=fmt)
+    logger.addHandler(handle)
 
 
 """ Command line parse """
@@ -42,17 +45,33 @@ def SetParser():
     return parser.parse_args()
 
 
-""" Global variable Config """
-config = configparser.ConfigParser()
-config.read('./web_crawler.ini')
-base_api = config['Settings']['BASE_API']
-base_path = config['Settings']['BASE_PATH']
-timeout = config['Settings']['TIMEOUT']
-save_path = config['Settings']['SAVE_PATH'] 
+""" Global Config """
+def SetGlobalConfig(config_file):
+    config = configparser.ConfigParser()
+    try:
+        config.read(config_file)
+        base_api = config['Settings']['BASE_API']
+        base_path = config['Settings']['BASE_PATH']
+        timeout = config['Settings']['TIMEOUT']
+        save_path = config['Settings']['SAVE_PATH'] 
+    except Exception as e:
+        print("Config File read has error")
+        return None
+    return base_api, base_path, timeout, save_path
 
 
+"""
+A crawler of maxbook.com
+
+url: url of document
+base_api: api of maxbook.com
+base_path: base api path
+timeout: Timeout
+save_path: Default Save Path of Images : "image" folder
+
+"""
 class Crawler():
-    def __init__(self, url, base_api, base_path, timeout, save_path=save_path) -> None:
+    def __init__(self, url, base_api, base_path, timeout, save_path) -> None:
         self.url: str = url
         self._metadata: Dict = {}
         self._image_dict: Dict = OrderedDict()
@@ -168,18 +187,20 @@ def convert_img_to_pdf(img_file_path, filename='save_file.pdf'):
     except Exception as e:
         logging.error(f"[!] convert process has error.")
         raise
+    # remove all image files
     [os.remove(f'{img_file_path}/{img_file}') for img_file in img_files]
 
 
 
 if __name__ == '__main__':
     args = SetParser()
-    print(args._get_args)
+    # print(args._get_args)
+    SetLogger()
+    base_api, base_path, timeout, save_path = SetGlobalConfig('./web_crawler.ini')
     Crawl = Crawler(args.url, base_api, base_path, timeout=int(timeout))
 
     Crawl.fetch_mata_info()
     Crawl.crawl_image()
-    # print(Crawl._image_dict)
     Crawl.save_images()
 
     if args.output_file:
